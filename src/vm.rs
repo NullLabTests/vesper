@@ -287,12 +287,13 @@ impl Vm {
         &mut self,
         closure: Rc<Closure>,
         arg_count: usize,
-        span: Span,
+        chunk: &Chunk,
+        op_offset: usize,
     ) -> Result<(), Error> {
         debug_assert!(self.stack.len() > arg_count);
         if arg_count != closure.function.arity {
             return Err(self.runtime_error(
-                span,
+                chunk.span(op_offset),
                 format!(
                     "expected {} arguments but got {arg_count}",
                     closure.function.arity
@@ -300,7 +301,7 @@ impl Vm {
             ));
         }
         if self.frames.len() >= MAX_FRAMES || self.stack.len() >= STACK_MAX {
-            return Err(self.runtime_error(span, "stack overflow"));
+            return Err(self.runtime_error(chunk.span(op_offset), "stack overflow"));
         }
         let slots = self.stack.len() - arg_count - 1;
         self.frames.push(CallFrame {
@@ -315,11 +316,16 @@ impl Vm {
     ///
     /// Returns `Some(closure)` if a new frame was pushed (the caller must then
     /// switch to it), or `None` if a native produced its result in place.
-    fn call_value(&mut self, arg_count: usize, span: Span) -> Result<Option<Rc<Closure>>, Error> {
+    fn call_value(
+        &mut self,
+        arg_count: usize,
+        chunk: &Chunk,
+        op_offset: usize,
+    ) -> Result<Option<Rc<Closure>>, Error> {
         let callee = self.peek(arg_count).clone();
         let Value::Obj(obj) = callee else {
             return Err(self.runtime_error(
-                span,
+                chunk.span(op_offset),
                 format!(
                     "can only call functions and classes, got {}",
                     callee.type_name()
@@ -329,7 +335,7 @@ impl Vm {
         match &*obj {
             Object::Closure(closure) => {
                 let closure = Rc::clone(closure);
-                self.call_closure(Rc::clone(&closure), arg_count, span)?;
+                self.call_closure(Rc::clone(&closure), arg_count, chunk, op_offset)?;
                 Ok(Some(closure))
             }
             Object::BoundMethod(bound) => {
@@ -338,19 +344,20 @@ impl Vm {
                 // slot 0 (`this`) of the callee's frame.
                 let callee_slot = self.stack.len() - arg_count - 1;
                 self.stack[callee_slot] = bound.receiver.clone();
-                self.call_closure(Rc::clone(&bound.method), arg_count, span)?;
+                self.call_closure(Rc::clone(&bound.method), arg_count, chunk, op_offset)?;
                 Ok(Some(Rc::clone(&bound.method)))
             }
             Object::Native(native) => {
                 if arg_count != native.arity {
                     return Err(self.runtime_error(
-                        span,
+                        chunk.span(op_offset),
                         format!("expected {} arguments but got {arg_count}", native.arity),
                     ));
                 }
                 let args_start = self.stack.len() - arg_count;
                 let args: Vec<Value> = self.stack[args_start..].to_vec();
-                let result = (native.func)(&args).map_err(|m| self.runtime_error(span, m))?;
+                let result = (native.func)(&args)
+                    .map_err(|m| self.runtime_error(chunk.span(op_offset), m))?;
                 self.stack.truncate(args_start - 1);
                 self.push(result);
                 Ok(None)
@@ -366,17 +373,19 @@ impl Vm {
                 let callee_slot = self.stack.len() - arg_count - 1;
                 self.stack[callee_slot] = Value::Obj(Rc::new(Object::Instance(instance)));
                 if let Some(init) = find_method(&class, "init") {
-                    self.call_closure(Rc::clone(&init), arg_count, span)?;
+                    self.call_closure(Rc::clone(&init), arg_count, chunk, op_offset)?;
                     Ok(Some(init))
                 } else if arg_count != 0 {
-                    Err(self
-                        .runtime_error(span, format!("expected 0 arguments but got {arg_count}")))
+                    Err(self.runtime_error(
+                        chunk.span(op_offset),
+                        format!("expected 0 arguments but got {arg_count}"),
+                    ))
                 } else {
                     Ok(None)
                 }
             }
             other => Err(self.runtime_error(
-                span,
+                chunk.span(op_offset),
                 format!(
                     "can only call functions and classes, got {}",
                     other.type_name()
@@ -394,14 +403,15 @@ impl Vm {
         &mut self,
         name: Rc<str>,
         arg_count: usize,
-        span: Span,
+        chunk: &Chunk,
+        op_offset: usize,
     ) -> Result<Option<Rc<Closure>>, Error> {
         let receiver = self.peek(arg_count).clone();
         let Value::Obj(obj) = receiver else {
-            return Err(self.runtime_error(span, "only instances have methods"));
+            return Err(self.runtime_error(chunk.span(op_offset), "only instances have methods"));
         };
         let Object::Instance(instance) = &*obj else {
-            return Err(self.runtime_error(span, "only instances have methods"));
+            return Err(self.runtime_error(chunk.span(op_offset), "only instances have methods"));
         };
         let instance = Rc::clone(instance);
 
@@ -409,13 +419,17 @@ impl Vm {
         if let Some(field) = field {
             let callee_slot = self.stack.len() - arg_count - 1;
             self.stack[callee_slot] = field;
-            return self.call_value(arg_count, span);
+            return self.call_value(arg_count, chunk, op_offset);
         }
 
         let class = Rc::clone(&instance.borrow().class);
-        let method = find_method(&class, &name)
-            .ok_or_else(|| self.runtime_error(span, format!("undefined property '{name}'")))?;
-        self.call_closure(Rc::clone(&method), arg_count, span)?;
+        let method = find_method(&class, &name).ok_or_else(|| {
+            self.runtime_error(
+                chunk.span(op_offset),
+                format!("undefined property '{name}'"),
+            )
+        })?;
+        self.call_closure(Rc::clone(&method), arg_count, chunk, op_offset)?;
         Ok(Some(method))
     }
 
@@ -436,9 +450,9 @@ impl Vm {
             let op_offset = ip;
             let byte = chunk.code[ip];
             ip += 1;
-            let span = chunk.span(op_offset);
-            let op = OpCode::from_byte(byte)
-                .ok_or_else(|| Error::runtime(format!("invalid opcode {byte}"), span))?;
+            let op = OpCode::from_byte(byte).ok_or_else(|| {
+                Error::runtime(format!("invalid opcode {byte}"), chunk.span(op_offset))
+            })?;
 
             if trace {
                 self.trace_instruction(op, op_offset, chunk);
@@ -474,7 +488,10 @@ impl Vm {
                 OpCode::GetGlobal => {
                     let name = read_name(chunk, &mut ip);
                     let value = self.globals.get(&*name).cloned().ok_or_else(|| {
-                        self.runtime_error(span, format!("undefined variable '{name}'"))
+                        self.runtime_error(
+                            chunk.span(op_offset),
+                            format!("undefined variable '{name}'"),
+                        )
                     })?;
                     self.push(value);
                 }
@@ -489,9 +506,10 @@ impl Vm {
                         let value = self.peek(0).clone();
                         self.globals.insert(name.to_string(), value);
                     } else {
-                        return Err(
-                            self.runtime_error(span, format!("undefined variable '{name}'"))
-                        );
+                        return Err(self.runtime_error(
+                            chunk.span(op_offset),
+                            format!("undefined variable '{name}'"),
+                        ));
                     }
                 }
                 OpCode::GetUpvalue => {
@@ -510,18 +528,21 @@ impl Vm {
                 }
                 OpCode::GetProperty => {
                     let name = read_name(chunk, &mut ip);
-                    self.get_property(&name, span)?;
+                    self.get_property(&name, chunk, op_offset)?;
                 }
                 OpCode::SetProperty => {
                     let name = read_name(chunk, &mut ip);
-                    self.set_property(name, span)?;
+                    self.set_property(name, chunk, op_offset)?;
                 }
                 OpCode::GetSuper => {
                     let name = read_name(chunk, &mut ip);
-                    let superclass = self.pop_class(span)?;
+                    let superclass = self.pop_class(chunk, op_offset)?;
                     let receiver = self.pop();
                     let method = find_method(&superclass, &name).ok_or_else(|| {
-                        self.runtime_error(span, format!("undefined property '{name}'"))
+                        self.runtime_error(
+                            chunk.span(op_offset),
+                            format!("undefined property '{name}'"),
+                        )
                     })?;
                     let bound = Rc::new(BoundMethod { receiver, method });
                     self.push(Value::Obj(Rc::new(Object::BoundMethod(bound))));
@@ -535,14 +556,14 @@ impl Vm {
                     let b = self.pop();
                     let Value::Number(b) = b else {
                         return Err(self.runtime_error(
-                            span,
+                            chunk.span(op_offset),
                             format!("operands must be numbers, got {}", b.type_name()),
                         ));
                     };
                     let a = self.pop();
                     let Value::Number(a) = a else {
                         return Err(self.runtime_error(
-                            span,
+                            chunk.span(op_offset),
                             format!("operands must be numbers, got {}", a.type_name()),
                         ));
                     };
@@ -552,14 +573,14 @@ impl Vm {
                     let b = self.pop();
                     let Value::Number(b) = b else {
                         return Err(self.runtime_error(
-                            span,
+                            chunk.span(op_offset),
                             format!("operands must be numbers, got {}", b.type_name()),
                         ));
                     };
                     let a = self.pop();
                     let Value::Number(a) = a else {
                         return Err(self.runtime_error(
-                            span,
+                            chunk.span(op_offset),
                             format!("operands must be numbers, got {}", a.type_name()),
                         ));
                     };
@@ -577,23 +598,23 @@ impl Vm {
                                 s.push_str(&y);
                                 self.push(Value::string(s));
                             }
-                            _ => return Err(self.binary_type_error(span, "+")),
+                            _ => return Err(self.binary_type_error(chunk.span(op_offset), "+")),
                         },
-                        _ => return Err(self.binary_type_error(span, "+")),
+                        _ => return Err(self.binary_type_error(chunk.span(op_offset), "+")),
                     }
                 }
                 OpCode::Subtract | OpCode::Multiply | OpCode::Divide => {
                     let b = self.pop();
                     let Value::Number(b) = b else {
                         return Err(self.runtime_error(
-                            span,
+                            chunk.span(op_offset),
                             format!("operands must be numbers, got {}", b.type_name()),
                         ));
                     };
                     let a = self.pop();
                     let Value::Number(a) = a else {
                         return Err(self.runtime_error(
-                            span,
+                            chunk.span(op_offset),
                             format!("operands must be numbers, got {}", a.type_name()),
                         ));
                     };
@@ -612,7 +633,7 @@ impl Vm {
                     let value = self.pop();
                     let Value::Number(n) = value else {
                         return Err(self.runtime_error(
-                            span,
+                            chunk.span(op_offset),
                             format!("operand must be a number, got {}", value.type_name()),
                         ));
                     };
@@ -643,7 +664,7 @@ impl Vm {
                     let arg_count = chunk.code[ip] as usize;
                     ip += 1;
                     self.frames[frame_index].ip = ip;
-                    if let Some(new_closure) = self.call_value(arg_count, span)? {
+                    if let Some(new_closure) = self.call_value(arg_count, chunk, op_offset)? {
                         frame_index = self.frames.len() - 1;
                         closure = new_closure;
                         ip = 0;
@@ -654,7 +675,7 @@ impl Vm {
                     let arg_count = chunk.code[ip] as usize;
                     ip += 1;
                     self.frames[frame_index].ip = ip;
-                    if let Some(new_closure) = self.invoke(name, arg_count, span)? {
+                    if let Some(new_closure) = self.invoke(name, arg_count, chunk, op_offset)? {
                         frame_index = self.frames.len() - 1;
                         closure = new_closure;
                         ip = 0;
@@ -665,11 +686,14 @@ impl Vm {
                     let arg_count = chunk.code[ip] as usize;
                     ip += 1;
                     self.frames[frame_index].ip = ip;
-                    let superclass = self.pop_class(span)?;
+                    let superclass = self.pop_class(chunk, op_offset)?;
                     let method = find_method(&superclass, &name).ok_or_else(|| {
-                        self.runtime_error(span, format!("undefined property '{name}'"))
+                        self.runtime_error(
+                            chunk.span(op_offset),
+                            format!("undefined property '{name}'"),
+                        )
                     })?;
-                    self.call_closure(Rc::clone(&method), arg_count, span)?;
+                    self.call_closure(Rc::clone(&method), arg_count, chunk, op_offset)?;
                     frame_index = self.frames.len() - 1;
                     closure = method;
                     ip = 0;
@@ -681,14 +705,17 @@ impl Vm {
                         Value::Obj(o) => match &**o {
                             Object::Function(f) => Rc::clone(f),
                             _ => {
-                                return Err(self
-                                    .runtime_error(span, "OP_CLOSURE constant is not a function"))
+                                return Err(self.runtime_error(
+                                    chunk.span(op_offset),
+                                    "OP_CLOSURE constant is not a function",
+                                ))
                             }
                         },
                         _ => {
-                            return Err(
-                                self.runtime_error(span, "OP_CLOSURE constant is not a function")
-                            )
+                            return Err(self.runtime_error(
+                                chunk.span(op_offset),
+                                "OP_CLOSURE constant is not a function",
+                            ))
                         }
                     };
                     let upvalue_count = function.upvalue_count;
@@ -741,10 +768,14 @@ impl Vm {
                     let superclass = self.peek(1).clone();
                     let subclass = self.peek(0).clone();
                     let (Value::Obj(sc), Value::Obj(sub)) = (&superclass, &subclass) else {
-                        return Err(self.runtime_error(span, "superclass must be a class"));
+                        return Err(
+                            self.runtime_error(chunk.span(op_offset), "superclass must be a class")
+                        );
                     };
                     let (Object::Class(sc), Object::Class(sub)) = (&**sc, &**sub) else {
-                        return Err(self.runtime_error(span, "superclass must be a class"));
+                        return Err(
+                            self.runtime_error(chunk.span(op_offset), "superclass must be a class")
+                        );
                     };
                     *sub.superclass.borrow_mut() = Some(Rc::clone(sc));
                     self.pop(); // discard the subclass; superclass stays as `super`
@@ -754,16 +785,28 @@ impl Vm {
                     let method = self.peek(0).clone();
                     let class = self.peek(1).clone();
                     let Value::Obj(obj) = class else {
-                        return Err(self.runtime_error(span, "OP_METHOD target is not a class"));
+                        return Err(self.runtime_error(
+                            chunk.span(op_offset),
+                            "OP_METHOD target is not a class",
+                        ));
                     };
                     let Object::Class(class) = &*obj else {
-                        return Err(self.runtime_error(span, "OP_METHOD target is not a class"));
+                        return Err(self.runtime_error(
+                            chunk.span(op_offset),
+                            "OP_METHOD target is not a class",
+                        ));
                     };
                     let Value::Obj(method_obj) = method else {
-                        return Err(self.runtime_error(span, "OP_METHOD value is not a method"));
+                        return Err(self.runtime_error(
+                            chunk.span(op_offset),
+                            "OP_METHOD value is not a method",
+                        ));
                     };
                     let Object::Closure(closure) = &*method_obj else {
-                        return Err(self.runtime_error(span, "OP_METHOD value is not a method"));
+                        return Err(self.runtime_error(
+                            chunk.span(op_offset),
+                            "OP_METHOD value is not a method",
+                        ));
                     };
                     class
                         .methods
@@ -798,26 +841,26 @@ impl Vm {
     }
 
     /// Pops a value that must be a class.
-    fn pop_class(&mut self, span: Span) -> Result<Rc<Class>, Error> {
+    fn pop_class(&mut self, chunk: &Chunk, op_offset: usize) -> Result<Rc<Class>, Error> {
         let value = self.pop();
         let Value::Obj(obj) = value else {
-            return Err(self.runtime_error(span, "superclass must be a class"));
+            return Err(self.runtime_error(chunk.span(op_offset), "superclass must be a class"));
         };
         let Object::Class(class) = &*obj else {
-            return Err(self.runtime_error(span, "superclass must be a class"));
+            return Err(self.runtime_error(chunk.span(op_offset), "superclass must be a class"));
         };
         Ok(Rc::clone(class))
     }
 
     /// Implements `OP_GET_PROPERTY`: turns `instance` (top of stack) into the
     /// field value or a bound method.
-    fn get_property(&mut self, name: &str, span: Span) -> Result<(), Error> {
+    fn get_property(&mut self, name: &str, chunk: &Chunk, op_offset: usize) -> Result<(), Error> {
         let receiver = self.peek(0).clone();
         let Value::Obj(obj) = receiver else {
-            return Err(self.runtime_error(span, "only instances have properties"));
+            return Err(self.runtime_error(chunk.span(op_offset), "only instances have properties"));
         };
         let Object::Instance(instance) = &*obj else {
-            return Err(self.runtime_error(span, "only instances have properties"));
+            return Err(self.runtime_error(chunk.span(op_offset), "only instances have properties"));
         };
         let instance = Rc::clone(instance);
 
@@ -828,8 +871,12 @@ impl Vm {
         }
 
         let class = Rc::clone(&instance.borrow().class);
-        let method = find_method(&class, name)
-            .ok_or_else(|| self.runtime_error(span, format!("undefined property '{name}'")))?;
+        let method = find_method(&class, name).ok_or_else(|| {
+            self.runtime_error(
+                chunk.span(op_offset),
+                format!("undefined property '{name}'"),
+            )
+        })?;
         let receiver = self.pop();
         let bound = Rc::new(BoundMethod { receiver, method });
         self.push(Value::Obj(Rc::new(Object::BoundMethod(bound))));
@@ -838,13 +885,18 @@ impl Vm {
 
     /// Implements `OP_SET_PROPERTY`: stack is `[instance, value]`; stores the
     /// field and leaves `value` on the stack.
-    fn set_property(&mut self, name: Rc<str>, span: Span) -> Result<(), Error> {
+    fn set_property(
+        &mut self,
+        name: Rc<str>,
+        chunk: &Chunk,
+        op_offset: usize,
+    ) -> Result<(), Error> {
         let object = self.peek(1).clone();
         let Value::Obj(obj) = object else {
-            return Err(self.runtime_error(span, "only instances have fields"));
+            return Err(self.runtime_error(chunk.span(op_offset), "only instances have fields"));
         };
         let Object::Instance(instance) = &*obj else {
-            return Err(self.runtime_error(span, "only instances have fields"));
+            return Err(self.runtime_error(chunk.span(op_offset), "only instances have fields"));
         };
         let value = self.peek(0).clone();
         instance

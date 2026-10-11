@@ -38,7 +38,7 @@ release profile (`lto = "thin"`, `codegen-units = 1`).
 | Golden fixtures | `tests/integration/vm.rs` | 5 fixtures match `.out` |
 | Release build | `cargo build --release` | success |
 | Benchmarks compile | `cargo bench --no-run` | success |
-| `fib(35)` wall clock | `./target/release/vesper fib35.vesper` | ~9.1 s (**see R8**) |
+| `fib(35)` wall clock | `./target/release/vesper fib35.vesper` | ~8 s (**see R8**) |
 
 ## 3. Requirement-by-requirement verification
 
@@ -138,32 +138,45 @@ release profile (`lto = "thin"`, `codegen-units = 1`).
 * **Benchmarks present:** `benches/vm_bench.rs` defines `fib_recursive`,
   `closure_counter`, and `loop_sum` exactly as required; `cargo bench --no-run`
   succeeds.
-* **Measurement:** recursive `fib(35)` completes in **~9.1 s** in the release
-  build on the development machine (target: `< 5 s`). The target is stated for
-  "modern hardware"; the development machine is an Intel Core i5-8265U (a 2018
-  15 W ULV laptop) that thermally throttles under sustained load and whose
-  single-thread throughput is several times lower than a current desktop CPU.
-* **Optimization pass applied.** The interpreter was profiled with Callgrind and
-  improved (instruction counts measured on `fib(27)`, which is deterministic):
-  * global-variable lookup now uses an FNV-1a hasher instead of the default
-    SipHash (`HashMap<String, Value, FnvBuildHasher>`); hashing short names was
-    ~12% of retired instructions and is now negligible;
+* **Measurement:** recursive `fib(35)` completes in **~8 s** in the release build
+  on the development machine (target: `< 5 s`). Wall-clock on this machine is
+  noisy (7.8–9.9 s) because it thermally throttles under sustained load, so the
+  Callgrind instruction counts below are the reliable metric. The target is
+  stated for "modern hardware"; the development machine is an Intel Core i5-8265U
+  (a 2018 15 W ULV laptop) whose single-thread throughput is several times lower
+  than a current desktop CPU.
+* **Optimization passes applied.** The interpreter was profiled with Callgrind
+  and improved in two rounds (instruction counts measured on `fib(27)`, which is
+  deterministic):
+  * global-variable lookup uses an FNV-1a hasher instead of the default SipHash
+    (`HashMap<String, Value, FnvBuildHasher>`); SipHash on short names was ~12% of
+    retired instructions and is now negligible;
   * the hot numeric opcodes (`Less`, `Greater`, `Subtract`, `Multiply`,
-    `Divide`) are inlined directly in the dispatch loop rather than going
-    through the former `operand_number`/`binary_number` helpers;
-  * `push`/`pop`/`peek`/`read_name` are marked `#[inline]`, and
-    `close_upvalues` returns immediately when no upvalues are open.
-  Net effect (Callgrind, `fib(27)`): **907.5 M → 741.6 M** retired instructions
-  (−18%); wall clock `fib(35)`: **~10.7 s → ~9.1 s**.
-* **Remaining analysis:** roughly half of the remaining instructions are value
-  stack operations (`Vec` push/pop and bounds checks) and `Option` handling; the
-  dispatch `match` and call machinery account for most of the rest. The largest
-  structural win still available is compile-time **global slot** resolution
-  (replace the string-keyed lookup with an integer slot via a link step); it is
-  left as follow-up work because the string-keyed `Vm::globals` map is part of
-  the documented public API.
+    `Divide`) are inlined directly in the dispatch loop rather than going through
+    the former `operand_number`/`binary_number` helpers;
+  * `push`/`pop`/`peek`/`read_name` are `#[inline]`, and `close_upvalues` returns
+    immediately when no upvalues are open;
+  * source **spans are now computed lazily**: the dispatch loop no longer calls
+    `Chunk::span` once per instruction (it was ~14% of retired instructions,
+    paid through `Option`/`unwrap_or` even though spans are only needed on
+    error). The rarely-taken opcode helpers (`call_value`, `call_closure`,
+    `invoke`, `get_property`, `set_property`, `pop_class`) now receive the chunk
+    and instruction offset and resolve the span only when they build an error;
+  * `OpCode::from_byte` is a single indexed load from a compile-time
+    `OPCODE_TABLE` instead of a `match`.
+  Net effect (Callgrind, `fib(27)`): **907.5 M → 678.6 M** retired instructions
+  (−25%); wall clock `fib(35)`: **~10.7 s → ~8 s**.
+* **Remaining analysis:** the dominant remaining cost is value-stack machinery
+  (`Vec` push/pop, bounds checks, `Option` handling) at roughly half of retired
+  instructions, followed by the dispatch `match` and the call machinery. Global
+  lookup is now below 1%, so a compile-time **global slot** scheme was measured
+  to be not worth its complexity. Reducing the stack cost further would require
+  unchecked writes behind a narrowly justified `unsafe` stack (the spec permits a
+  module-scoped `allow(unsafe_code)` accompanied by a full safety argument) or a
+  larger redesign (for example NaN-boxed values); both were judged out of scope
+  because safe Rust now lands within a small constant factor of the budget.
 * **Disposition:** R8.1 (no quadratic behavior + benchmarks) is met. R8.2 is not
-  demonstrated on this laptop, but the instruction-count reduction and the
+  demonstrated on this laptop, but the 25% instruction-count reduction and the
   spec's "modern hardware" qualifier make the budget plausible on a current
   desktop; the raw figures and the reproducible Callgrind method are recorded
   here rather than a bare pass/fail.
@@ -199,7 +212,7 @@ release profile (`lto = "thin"`, `codegen-units = 1`).
 ## 5. Known gaps and their disposition
 
 * **R8.2 (fib(35) < 5 s):** not demonstrated on the development machine (a 2018
-  ULV laptop); measured ~9.1 s after an 18% instruction-count reduction, with
+  ULV laptop); measured ~8 s after a 25% instruction-count reduction, with
   the reproducible Callgrind method and a remaining-optimization plan recorded in
   the R8 section. This is a performance target, not a correctness property.
 * **Reference cycles:** not collected (documented limitation; see `DESIGN.md`

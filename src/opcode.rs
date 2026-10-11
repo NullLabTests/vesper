@@ -56,6 +56,22 @@ pub enum OpCode {
     Method,
 }
 
+/// Lookup table backing [`OpCode::from_byte`]: one entry per possible byte.
+///
+/// Byte values for which [`OpCode::decode_raw`] returns `None` hold `None`.
+const OPCODE_TABLE: [Option<OpCode>; 256] = build_opcode_table();
+
+/// Builds [`OPCODE_TABLE`] at compile time by decoding every byte.
+const fn build_opcode_table() -> [Option<OpCode>; 256] {
+    let mut table = [None; 256];
+    let mut byte = 0u16;
+    while byte < 256 {
+        table[byte as usize] = OpCode::decode_raw(byte as u8);
+        byte += 1;
+    }
+    table
+}
+
 impl OpCode {
     /// The byte encoding of this opcode.
     #[must_use]
@@ -101,9 +117,9 @@ impl OpCode {
         }
     }
 
-    /// Decodes a byte into an opcode, or `None` if it is not a valid opcode.
-    #[must_use]
-    pub const fn from_byte(byte: u8) -> Option<Self> {
+    /// Decodes a byte into an opcode via a direct `match`, or `None` if it is
+    /// not a valid opcode.
+    const fn decode_raw(byte: u8) -> Option<Self> {
         Some(match byte {
             0 => Self::Constant,
             1 => Self::Nil,
@@ -144,6 +160,15 @@ impl OpCode {
             36 => Self::Method,
             _ => return None,
         })
+    }
+
+    /// Decodes a byte into an opcode, or `None` if it is not a valid opcode.
+    ///
+    /// Implemented as a single indexed load from [`OPCODE_TABLE`] so the hot
+    /// interpreter loop pays one bounds-elided access instead of a `match`.
+    #[must_use]
+    pub const fn from_byte(byte: u8) -> Option<Self> {
+        OPCODE_TABLE[byte as usize]
     }
 
     /// The mnemonic used by the disassembler.
