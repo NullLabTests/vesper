@@ -35,8 +35,43 @@ use crate::value::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// A tiny FNV-1a hasher for global-variable names.
+///
+/// Global names are short (a few bytes) and few in number, so the
+/// denial-of-service resistance of the default `SipHash` buys nothing while
+/// costing a measurable fraction of interpreter time on global-heavy code such
+/// as recursion. FNV-1a is a couple of instructions per byte.
+pub struct FnvHasher(u64);
+
+impl Hasher for FnvHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut hash = self.0;
+        for &byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.0 = hash;
+    }
+}
+
+impl Default for FnvHasher {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+/// Builds [`FnvHasher`]s with the standard FNV-1a offset basis.
+pub type FnvBuildHasher = BuildHasherDefault<FnvHasher>;
 
 /// Maximum depth of the call stack.
 ///
@@ -68,7 +103,7 @@ pub struct Vm {
     frames: Vec<CallFrame>,
     open_upvalues: Vec<Rc<RefCell<Upvalue>>>,
     /// Global variables. Persists across [`Vm::interpret`] calls.
-    pub globals: HashMap<String, Value>,
+    pub globals: HashMap<String, Value, FnvBuildHasher>,
     /// Captured `print` output (and trace lines).
     output: String,
     /// When set, each instruction is traced to [`Vm::output`].
@@ -89,7 +124,7 @@ impl Vm {
             stack: Vec::with_capacity(64),
             frames: Vec::with_capacity(8),
             open_upvalues: Vec::new(),
-            globals: HashMap::new(),
+            globals: HashMap::default(),
             output: String::new(),
             trace: false,
         };
@@ -151,6 +186,7 @@ impl Vm {
     /// Pushes a value.
     ///
     /// Precondition: `stack.len() < STACK_MAX` (checked on entry to every call).
+    #[inline]
     fn push(&mut self, value: Value) {
         debug_assert!(self.stack.len() < STACK_MAX, "value stack overflow");
         self.stack.push(value);
@@ -160,12 +196,14 @@ impl Vm {
     ///
     /// Precondition: the stack is non-empty. Returns `Value::Nil` defensively if
     /// it is not, which can only happen after a compiler bug.
+    #[inline]
     fn pop(&mut self) -> Value {
         debug_assert!(!self.stack.is_empty(), "value stack underflow");
         self.stack.pop().unwrap_or(Value::Nil)
     }
 
     /// Returns the value `distance` below the top (`0` is the top).
+    #[inline]
     fn peek(&self, distance: usize) -> &Value {
         &self.stack[self.stack.len() - 1 - distance]
     }
@@ -208,6 +246,11 @@ impl Vm {
     /// Precondition: `last <= stack.len()`. Upvalues below `last` belong to an
     /// enclosing frame and are left open.
     fn close_upvalues(&mut self, last: usize) {
+        // Fast path: most returns have no open upvalues at all (no closure was
+        // ever created below this frame).
+        if self.open_upvalues.is_empty() {
+            return;
+        }
         // Snapshot the cells that must be closed. Doing this in two passes avoids
         // holding a `Ref` from `borrow()` across the `borrow_mut()` that closes
         // the cell (which would panic at runtime).
@@ -386,6 +429,7 @@ impl Vm {
         let mut frame_index = self.frames.len() - 1;
         let mut closure = Rc::clone(&self.frames[frame_index].closure);
         let mut ip = self.frames[frame_index].ip;
+        let trace = self.trace;
 
         loop {
             let chunk = &closure.function.chunk;
@@ -396,7 +440,7 @@ impl Vm {
             let op = OpCode::from_byte(byte)
                 .ok_or_else(|| Error::runtime(format!("invalid opcode {byte}"), span))?;
 
-            if self.trace {
+            if trace {
                 self.trace_instruction(op, op_offset, chunk);
             }
 
@@ -488,7 +532,13 @@ impl Vm {
                     self.push(Value::Bool(a.equals(&b)));
                 }
                 OpCode::Greater => {
-                    let b = self.operand_number(span)?;
+                    let b = self.pop();
+                    let Value::Number(b) = b else {
+                        return Err(self.runtime_error(
+                            span,
+                            format!("operands must be numbers, got {}", b.type_name()),
+                        ));
+                    };
                     let a = self.pop();
                     let Value::Number(a) = a else {
                         return Err(self.runtime_error(
@@ -499,7 +549,13 @@ impl Vm {
                     self.push(Value::Bool(a > b));
                 }
                 OpCode::Less => {
-                    let b = self.operand_number(span)?;
+                    let b = self.pop();
+                    let Value::Number(b) = b else {
+                        return Err(self.runtime_error(
+                            span,
+                            format!("operands must be numbers, got {}", b.type_name()),
+                        ));
+                    };
                     let a = self.pop();
                     let Value::Number(a) = a else {
                         return Err(self.runtime_error(
@@ -526,9 +582,28 @@ impl Vm {
                         _ => return Err(self.binary_type_error(span, "+")),
                     }
                 }
-                OpCode::Subtract => self.binary_number(span, |a, b| a - b)?,
-                OpCode::Multiply => self.binary_number(span, |a, b| a * b)?,
-                OpCode::Divide => self.binary_number(span, |a, b| a / b)?,
+                OpCode::Subtract | OpCode::Multiply | OpCode::Divide => {
+                    let b = self.pop();
+                    let Value::Number(b) = b else {
+                        return Err(self.runtime_error(
+                            span,
+                            format!("operands must be numbers, got {}", b.type_name()),
+                        ));
+                    };
+                    let a = self.pop();
+                    let Value::Number(a) = a else {
+                        return Err(self.runtime_error(
+                            span,
+                            format!("operands must be numbers, got {}", a.type_name()),
+                        ));
+                    };
+                    let result = match op {
+                        OpCode::Subtract => a - b,
+                        OpCode::Multiply => a * b,
+                        _ => a / b,
+                    };
+                    self.push(Value::Number(result));
+                }
                 OpCode::Not => {
                     let value = self.pop();
                     self.push(Value::Bool(value.is_falsey()));
@@ -717,26 +792,6 @@ impl Vm {
         self.output.push('\n');
     }
 
-    /// Pops and type-checks the top value as a number, returning it.
-    fn operand_number(&mut self, span: Span) -> Result<f64, Error> {
-        let value = self.pop();
-        let Value::Number(n) = value else {
-            return Err(self.runtime_error(
-                span,
-                format!("operands must be numbers, got {}", value.type_name()),
-            ));
-        };
-        Ok(n)
-    }
-
-    /// Applies `f` to two numeric operands.
-    fn binary_number(&mut self, span: Span, f: impl Fn(f64, f64) -> f64) -> Result<(), Error> {
-        let b = self.operand_number(span)?;
-        let a = self.operand_number(span)?;
-        self.push(Value::Number(f(a, b)));
-        Ok(())
-    }
-
     /// Builds a "bad operands for binary `<op>`" error.
     fn binary_type_error(&self, span: Span, op: &str) -> Error {
         self.runtime_error(span, format!("invalid operands for binary '{op}'"))
@@ -808,6 +863,7 @@ impl Vm {
 ///
 /// Falls back to an empty string if the constant is not a string, which cannot
 /// happen for compiler-produced bytecode.
+#[inline]
 fn read_name(chunk: &Chunk, ip: &mut usize) -> Rc<str> {
     let index = chunk.code[*ip];
     *ip += 1;
