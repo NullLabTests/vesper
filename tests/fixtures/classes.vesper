@@ -1,0 +1,37 @@
+// Classes: methods, fields, inheritance, super, and bound initializers.
+class Animal {
+  init(name) {
+    this.name = name;
+  }
+  speak() {
+    return this.name + " makes a sound";
+  }
+  describe() {
+    return "I am " + this.name;
+  }
+}
+
+class Dog < Animal {
+  init(name, breed) {
+    super.init(name);
+    this.breed = breed;
+  }
+  speak() {
+    return this.name + " barks";
+  }
+  breed_line() {
+    return this.breed;
+  }
+}
+
+var a = Animal("Generic");
+print a.speak();
+print a.describe();
+
+var d = Dog("Rex", "lab");
+print d.speak();
+print d.describe();
+print d.breed_line();
+
+var bound = d.speak;
+print bound();

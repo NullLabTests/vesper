@@ -1,0 +1,16 @@
+# Build artifacts
+/target/
+
+# The private specification prompt used to bootstrap this repository.
+# It is intentionally not part of the public source tree.
+.prompt
+
+# Editor/OS noise
+*.swp
+.DS_Store
+
+# Criterion benchmark output
+/criterion/
+
+# Rust backup files
+**/*.rs.bk

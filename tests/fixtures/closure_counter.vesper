@@ -1,0 +1,28 @@
+// Closures capture mutable state, including nested captures.
+fun make_counter() {
+  var count = 0;
+  fun increment() {
+    count = count + 1;
+    return count;
+  }
+  return increment;
+}
+
+var a = make_counter();
+print a();
+print a();
+print a();
+
+var b = make_counter();
+print b();
+
+fun outer(x) {
+  fun middle(y) {
+    fun inner(z) {
+      return x + y + z;
+    }
+    return inner;
+  }
+  return middle;
+}
+print outer(1)(2)(3);

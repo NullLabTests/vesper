@@ -1,0 +1,87 @@
+[package]
+name = "vesper"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Vesper: a small dynamically-typed language implemented with a bytecode stack virtual machine"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nulllabtests/vesper"
+homepage = "https://github.com/nulllabtests/vesper"
+readme = "README.md"
+keywords = ["language", "interpreter", "compiler", "vm", "bytecode"]
+categories = ["compilers", "development-tools"]
+
+[lib]
+name = "vesper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vesper"
+path = "src/main.rs"
+
+[dependencies]
+thiserror = "1"
+rustyline = "14"
+
+[dev-dependencies]
+proptest = "1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# The VM dispatch loop is the hot path; a leaner release build meaningfully
+# improves interpreter throughput (and keeps the R8 benchmark honest).
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[[bench]]
+name = "vm_bench"
+harness = false
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "allow"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# The following lints are intentionally allowed, with rationale.
+# Numeric casts between f64 and integer types are used only at well-defined
+# boundaries (number formatting, opcode decoding) and are guarded.
+cast_precision_loss = "allow"
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_lossless = "allow"
+# Names deliberately repeat the module concept (e.g. `LexerError` in `error`).
+module_name_repetitions = "allow"
+# `#[must_use]` is applied where it matters; not every accessor needs it.
+must_use_candidate = "allow"
+# Errors are documented at the module/crate level; per-API sections are partial.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# Short, obvious local names are intentional in compiler/VM hot loops.
+similar_names = "allow"
+many_single_char_names = "allow"
+# The compiler and VM dispatch loop are inherently long; splitting hurts clarity.
+too_many_lines = "allow"
+# Explicit early-return style is preferred for readability.
+option_if_let_else = "allow"
+manual_let_else = "allow"
+# Match arms with identical bodies are clearer than merged patterns here.
+match_same_arms = "allow"
+# Passing by value is intentional for small Copy types and owned data.
+needless_pass_by_value = "allow"
+# `unused_self` methods keep a consistent receiver-based API.
+unused_self = "allow"
+# Explicit `TokenKind::Foo` / `Expr::Bar` paths are clearer than `Self::Foo` in
+# the AST and token definitions, where variants are cross-referenced constantly.
+use_self = "allow"
+# `const fn` is a performance detail, not a correctness property; forcing it
+# would couple otherwise ordinary methods to compiler const-eval limitations.
+missing_const_for_fn = "allow"
+# `==` on numbers is specified to follow IEEE-754 (so `NaN != NaN`); approximate
+# comparison would change observable language semantics.
+float_cmp = "allow"
+# Nursery style lint: `x = y.clone()` is clear and allocating a fresh handle is
+# intended in these places.
+assigning_clones = "allow"

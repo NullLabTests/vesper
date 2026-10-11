@@ -1,0 +1,7 @@
+// Strings: concatenation, escapes, and printing.
+var greeting = "Hello" + ", " + "world" + "!";
+print greeting;
+print "tab\tseparated";
+print "line\nbreak";
+print "quote: \" and backslash: \\";
+print "length via concat: " + "abc" + "def";

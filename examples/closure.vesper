@@ -1,0 +1,19 @@
+// Closures — functions capturing and mutating their enclosing environment.
+
+fun make_counter(start) {
+  var count = start;
+  fun increment() {
+    count = count + 1;
+    return count;
+  }
+  return increment;
+}
+
+var a = make_counter(0);
+var b = make_counter(100);
+
+print a();
+print a();
+print b();
+print a();
+print b();

@@ -1,0 +1,33 @@
+// Classes — state, methods, initializers, inheritance, and `super`.
+
+class Animal {
+  init(name) {
+    this.name = name;
+  }
+
+  speak() {
+    print this.name + " makes a sound";
+  }
+}
+
+class Dog < Animal {
+  speak() {
+    print this.name + " barks";
+  }
+}
+
+class Puppy < Dog {
+  speak() {
+    super.speak();
+    print this.name + " yips";
+  }
+}
+
+var generic = Animal("Creature");
+generic.speak();
+
+var rex = Dog("Rex");
+rex.speak();
+
+var pup = Puppy("Pip");
+pup.speak();

@@ -1,0 +1,22 @@
+// Recursion and arity: classic recursive and mutually-recursive functions.
+fun fib(n) {
+  if (n < 2) return n;
+  return fib(n - 1) + fib(n - 2);
+}
+
+fun is_even(n) {
+  if (n == 0) return true;
+  return is_odd(n - 1);
+}
+
+fun is_odd(n) {
+  if (n == 0) return false;
+  return is_even(n - 1);
+}
+
+for (var i = 0; i <= 10; i = i + 1) {
+  print fib(i);
+}
+
+print is_even(10);
+print is_odd(7);

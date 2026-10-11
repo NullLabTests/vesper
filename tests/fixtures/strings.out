@@ -1,0 +1,6 @@
+Hello, world!
+tab	separated
+line
+break
+quote: " and backslash: \
+length via concat: abcdef

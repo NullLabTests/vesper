@@ -1,0 +1,19 @@
+// Control flow: if/else, while, for, break, continue, logical operators.
+var sum = 0;
+for (var i = 0; i < 10; i = i + 1) {
+  if (i == 3) continue;
+  if (i == 8) break;
+  sum = sum + i;
+}
+print sum;
+
+var n = 5;
+while (n > 0) {
+  print n;
+  n = n - 1;
+}
+
+print true and false;
+print false or 42;
+print 0 and 7;
+print nil or "fallback";
