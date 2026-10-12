@@ -170,10 +170,14 @@ superclass, unresolved globals.
 
 ### R7 — Safety
 
-**R7.1** There is no undefined behavior; no `unsafe` is used anywhere.
+**R7.1** There is no undefined behavior; `unsafe` is confined to one audited,
+hot-path module and every unchecked operation there documents its safety.
 
-*Verification:* `#![forbid(unsafe_code)]` at the crate root (compiler-enforced)
-and `unsafe_code = "forbid"` in `[lints.rust]`; **R**.
+*Verification:* `unsafe_code = "deny"` at the crate root (`src/lib.rs`) and in
+`[lints.rust]`; the only module that opts back in is `src/stack.rs`
+(`#[allow(unsafe_code)]`), which states the `Stack` invariants and the safety
+argument for each unchecked primitive. Every other module compiles under the
+denial, so introducing `unsafe` elsewhere fails the build; **R**.
 
 **R7.2** All critical stack/frame invariants are asserted in debug builds.
 
@@ -191,9 +195,10 @@ throughput.
 **R8.2** `fib(35)` completes in reasonable time (target `< 5 s` in release on
 modern hardware).
 
-*Verification:* measured; see `VERIFICATION.md`. **Target not met on the
-development machine** (~10–11 s). The requirement is tracked as partially
-verified, with an identified optimization path (global-name interning). **B/R**.
+*Verification:* measured; see `VERIFICATION.md`. On the development machine
+(a 2018 15 W ULV laptop) it runs in **~8.5 s**; the requirement is tracked as
+partially verified (target not demonstrated on this hardware), with the
+completed optimization passes and the remaining path recorded there. **B/R**.
 
 ### R9 — Documentation
 

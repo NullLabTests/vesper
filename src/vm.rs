@@ -31,6 +31,7 @@ use crate::object::{
 };
 use crate::opcode::OpCode;
 use crate::span::Span;
+use crate::stack::Stack;
 use crate::value::Value;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -99,7 +100,7 @@ struct CallFrame {
 
 /// The virtual machine.
 pub struct Vm {
-    stack: Vec<Value>,
+    stack: Stack,
     frames: Vec<CallFrame>,
     open_upvalues: Vec<Rc<RefCell<Upvalue>>>,
     /// Global variables. Persists across [`Vm::interpret`] calls.
@@ -121,7 +122,7 @@ impl Vm {
     #[must_use]
     pub fn new() -> Self {
         let mut vm = Self {
-            stack: Vec::with_capacity(64),
+            stack: Stack::with_capacity(64),
             frames: Vec::with_capacity(8),
             open_upvalues: Vec::new(),
             globals: HashMap::default(),
@@ -199,19 +200,19 @@ impl Vm {
     #[inline]
     fn pop(&mut self) -> Value {
         debug_assert!(!self.stack.is_empty(), "value stack underflow");
-        self.stack.pop().unwrap_or(Value::Nil)
+        self.stack.pop()
     }
 
     /// Returns the value `distance` below the top (`0` is the top).
     #[inline]
     fn peek(&self, distance: usize) -> &Value {
-        &self.stack[self.stack.len() - 1 - distance]
+        self.stack.peek(distance)
     }
 
     /// Reads and clears a captured upvalue cell's current value.
     fn upvalue_get(&self, uv: &Rc<RefCell<Upvalue>>) -> Value {
         match &uv.borrow().location {
-            UpvalueLocation::Stack(index) => self.stack[*index].clone(),
+            UpvalueLocation::Stack(index) => self.stack.get(*index).clone(),
             UpvalueLocation::Closed(value) => value.clone(),
         }
     }
@@ -219,7 +220,7 @@ impl Vm {
     /// Writes a captured upvalue cell's current value.
     fn upvalue_set(&mut self, uv: &Rc<RefCell<Upvalue>>, value: Value) {
         match &mut uv.borrow_mut().location {
-            UpvalueLocation::Stack(index) => self.stack[*index] = value,
+            UpvalueLocation::Stack(index) => self.stack.set(*index, value),
             UpvalueLocation::Closed(slot) => *slot = value,
         }
     }
@@ -263,7 +264,7 @@ impl Vm {
             }
         }
         for (uv, index) in &closing {
-            let value = self.stack[*index].clone();
+            let value = self.stack.get(*index).clone();
             uv.borrow_mut().location = UpvalueLocation::Closed(value);
         }
         // Open upvalues never move backwards to the stack, so any closed cell can
@@ -343,7 +344,7 @@ impl Vm {
                 // Replace the bound method with its receiver so it becomes
                 // slot 0 (`this`) of the callee's frame.
                 let callee_slot = self.stack.len() - arg_count - 1;
-                self.stack[callee_slot] = bound.receiver.clone();
+                self.stack.set(callee_slot, bound.receiver.clone());
                 self.call_closure(Rc::clone(&bound.method), arg_count, chunk, op_offset)?;
                 Ok(Some(Rc::clone(&bound.method)))
             }
@@ -355,7 +356,7 @@ impl Vm {
                     ));
                 }
                 let args_start = self.stack.len() - arg_count;
-                let args: Vec<Value> = self.stack[args_start..].to_vec();
+                let args: Vec<Value> = self.stack.tail_from(args_start);
                 let result = (native.func)(&args)
                     .map_err(|m| self.runtime_error(chunk.span(op_offset), m))?;
                 self.stack.truncate(args_start - 1);
@@ -371,7 +372,8 @@ impl Vm {
                 // Replace the class on the stack with the fresh instance so it
                 // becomes slot 0 (`this`) when the initializer runs.
                 let callee_slot = self.stack.len() - arg_count - 1;
-                self.stack[callee_slot] = Value::Obj(Rc::new(Object::Instance(instance)));
+                self.stack
+                    .set(callee_slot, Value::Obj(Rc::new(Object::Instance(instance))));
                 if let Some(init) = find_method(&class, "init") {
                     self.call_closure(Rc::clone(&init), arg_count, chunk, op_offset)?;
                     Ok(Some(init))
@@ -418,7 +420,7 @@ impl Vm {
         let field = instance.borrow().fields.borrow().get(&*name).cloned();
         if let Some(field) = field {
             let callee_slot = self.stack.len() - arg_count - 1;
-            self.stack[callee_slot] = field;
+            self.stack.set(callee_slot, field);
             return self.call_value(arg_count, chunk, op_offset);
         }
 
@@ -450,9 +452,12 @@ impl Vm {
             let op_offset = ip;
             let byte = chunk.code[ip];
             ip += 1;
-            let op = OpCode::from_byte(byte).ok_or_else(|| {
-                Error::runtime(format!("invalid opcode {byte}"), chunk.span(op_offset))
-            })?;
+            let Some(op) = OpCode::from_byte(byte) else {
+                return Err(Error::runtime(
+                    format!("invalid opcode {byte}"),
+                    chunk.span(op_offset),
+                ));
+            };
 
             if trace {
                 self.trace_instruction(op, op_offset, chunk);
@@ -475,7 +480,7 @@ impl Vm {
                     let slot = chunk.code[ip] as usize;
                     ip += 1;
                     let index = self.frames[frame_index].slots + slot;
-                    let value = self.stack[index].clone();
+                    let value = self.stack.get(index).clone();
                     self.push(value);
                 }
                 OpCode::SetLocal => {
@@ -483,7 +488,7 @@ impl Vm {
                     ip += 1;
                     let value = self.peek(0).clone();
                     let index = self.frames[frame_index].slots + slot;
-                    self.stack[index] = value;
+                    self.stack.set(index, value);
                 }
                 OpCode::GetGlobal => {
                     let name = read_name(chunk, &mut ip);
@@ -829,7 +834,7 @@ impl Vm {
             chunk.line(offset),
             self.stack.len()
         );
-        for value in &self.stack {
+        for value in self.stack.iter() {
             let _ = write!(self.output, " {value}");
         }
         self.output.push('\n');

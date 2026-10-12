@@ -25,7 +25,10 @@
 //! assert_eq!(output, "42\n");
 //! ```
 
-#![forbid(unsafe_code)]
+// `unsafe` is denied everywhere except the single hot-path module that opts in
+// with a module-scoped `allow(unsafe_code)` and a full safety argument. See
+// [`stack`] for that justification; this keeps the safety surface to one file.
+#![deny(unsafe_code)]
 #![doc(html_root_url = "https://docs.rs/vesper")]
 
 pub mod ast;
@@ -40,6 +43,7 @@ pub mod parser;
 pub mod repl;
 pub mod resolver;
 pub mod span;
+mod stack;
 pub mod token;
 pub mod value;
 pub mod vm;

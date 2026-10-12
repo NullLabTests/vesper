@@ -160,9 +160,10 @@ loop.
   for the tree-walker *and* produces semantic diagnostics; `compiler.rs`
   independently computes local slots and upvalues in the classic clox fashion.
   Agreement between the two back-ends is asserted on every fixture.
-* **Reference counting, no GC.** `Rc`/`RefCell` give a fully safe memory model
-  with no `unsafe` and no collection pauses; cycles are a documented
-  non-collected limitation. `unsafe_code` is `forbid`den crate-wide.
+* **Reference counting, no GC.** `Rc`/`RefCell` give a deterministic memory
+  model with no collection pauses; cycles are a documented non-collected
+  limitation. `unsafe_code` is `deny`d crate-wide, with a single audited
+  exception (`src/stack.rs`) for the interpreter's hot value stack.
 * **Typed errors everywhere.** A single `error::Error` enum carries a `Span`;
   no stage swallows, panics, or prints. Every `?` is a typed, located failure.
 * **Named limits.** `MAX_PARAMS`, `MAX_LOCALS`, `MAX_UPVALUES`, `MAX_FRAMES`,

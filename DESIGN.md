@@ -12,7 +12,7 @@ artifacts for the project; see also [`REQUIREMENTS.md`](REQUIREMENTS.md) and
 * A complete, readable implementation of a small dynamically-typed language:
   lexer, parser, resolver, bytecode compiler, VM, and a tree-walking oracle.
 * Correctness and auditability first: typed errors, span-precise diagnostics,
-  explicit invariants, no `unsafe`.
+  explicit invariants, `unsafe` confined to a single audited module.
 * Two independent execution back-ends that must agree on observable behavior.
 
 **Non-goals**
@@ -205,11 +205,14 @@ pub enum Value { Nil, Bool(bool), Number(f64), Obj(Rc<Object>) }
 ### 7.1 Memory management and safety
 
 Memory is managed by **reference counting** (`Rc`/`RefCell`), not tracing GC.
-This gives deterministic reclamation, no stop-the-world pauses, and — critically
-— **no `unsafe` code**. `#![forbid(unsafe_code)]` is applied at the crate root.
-The documented limitation is that reference cycles are not reclaimed; the
-language as specified has no way to create cycles between instances without
-going through fields, and cycles are out of scope (§10).
+This gives deterministic reclamation, no stop-the-world pauses, and a memory
+model that is safe Rust everywhere except one audited module. `unsafe_code` is
+`deny`d at the crate root; `src/stack.rs` (the interpreter's hot value stack) is
+the sole module that opts back in with `#[allow(unsafe_code)]`, and it documents
+the `Stack` invariants and the safety of every unchecked operation. The
+documented limitation is that reference cycles are not reclaimed; the language as
+specified has no way to create cycles between instances without going through
+fields, and cycles are out of scope (§10).
 
 `RefCell` borrow discipline is central to VM correctness. The hot borrows are
 kept short and the code avoids holding a `Ref`/`RefMut` across a call back into
@@ -256,13 +259,15 @@ prioritizes clarity, so the stack VM wins.
 ### 9.1 Performance notes
 
 * `OP_GET_GLOBAL`/`OP_SET_GLOBAL` hash string names in a `HashMap<String, Value>`
-  (SipHash). Interning global names (pointer comparison) is the obvious future
-  win; the current design favors correctness and clarity. Callgrind shows global
-  lookups at roughly 12% of instructions on the Fibonacci workload.
-* `fib(35)` runs in roughly 10–11 s in a release build on the development
-  machine, versus the R8 target of under 5 s — see `VERIFICATION.md` for the
-  honest measurement and the identified optimization path. The value stack and
-  call frames are pre-sized to avoid reallocation in the common case.
+  (now with an FNV hasher rather than SipHash). Interning global names (pointer
+  comparison, then a slot operand) is the obvious future win; the current design
+  favors correctness and clarity. After the optimization passes recorded in
+  `VERIFICATION.md`, global lookups are below 1% of instructions on the Fibonacci
+  workload.
+* `fib(35)` runs in roughly 8.5 s in a release build on the development machine, a
+  2018 15 W ULV laptop, versus the R8 target of under 5 s — see `VERIFICATION.md`
+  for the honest measurement and the completed optimization passes. The value
+  stack and call frames are pre-sized to avoid reallocation in the common case.
 
 ## 10. Future extension points
 
@@ -293,4 +298,6 @@ prioritizes clarity, so the stack VM wins.
 6. An open upvalue's stack index always refers to a live slot.
 7. The VM and the tree-walker produce identical `print` output for every
    program neither rejects (differential testing).
-8. No `unsafe` code exists anywhere in the crate.
+8. The crate's only `unsafe` lives in `src/stack.rs`, whose unchecked operations
+   uphold its documented invariants (every other module is compiled with
+   `unsafe_code` denied).

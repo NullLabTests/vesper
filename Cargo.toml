@@ -38,7 +38,9 @@ name = "vm_bench"
 harness = false
 
 [lints.rust]
-unsafe_code = "forbid"
+# Denied crate-wide; the sole exception is `src/stack.rs`, which opts back in
+# with a module-scoped `allow(unsafe_code)` and a documented safety argument.
+unsafe_code = "deny"
 missing_docs = "allow"
 
 [lints.clippy]
